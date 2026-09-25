@@ -161,3 +161,7 @@ cython_debug/
 
 .ruff_cache/
 *.zip
+# generated tokenizer outputs and profiles
+/vocab.json
+/merges.txt
+/profiles/
