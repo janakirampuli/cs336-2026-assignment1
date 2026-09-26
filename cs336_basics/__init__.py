@@ -6,3 +6,4 @@ except importlib.metadata.PackageNotFoundError:
     pass
 
 from .train_bpe import train_bpe
+from .tokenizer import Tokenizer

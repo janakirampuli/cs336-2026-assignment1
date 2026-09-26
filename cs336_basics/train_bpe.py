@@ -181,6 +181,8 @@ def train_bpe(
         word_tokens.append(tuple(byte_tokens[b] for b in pretoken.encode("utf-8")))
         word_counts.append(count)
 
+    del pretoken_counts
+    
     # pair_counts: adjacent token pair -> total count across all words, weighted by word count
     #   e.g. {(b' ', b't'): 90210, (b't', b'h'): 71553, ...}
     pair_counts = Counter()
