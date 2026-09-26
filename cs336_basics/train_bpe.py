@@ -87,54 +87,36 @@ def process_chunk(
         end: int,
         special_tokens: Optional[List[str]]
 ) -> Counter:
-    # word_freqs: pre-token (as a tuple of single-byte tokens) -> count in this chunk
-    #   e.g. {(b' ', b't', b'h', b'e'): 5821, (b'<|endoftext|>',): 312, ...}
-    word_freqs = Counter()
+    # pretoken_counts: pre-token string -> count in this chunk, e.g. {" the": 5821, " cat": 310, ...}
+    # Kept as strings (cheap to hash and to send back to the main process); they're converted to
+    # byte tokens only once per distinct pre-token, in train_bpe.
+    pretoken_counts = Counter()
 
-    pretoken_pattern = re.compile(PAT)
-    # empty set when there are no special tokens, e.g. {"<|endoftext|>"}
-    special_tokens_set = set(special_tokens or [])
-    special_split_pattern = None
+    with open(input_path, 'rb') as f:
+        f.seek(start)
+        text = f.read(end - start).decode("utf-8", errors="ignore")
 
+    # segments: text split around special tokens
+    #   e.g. ["Once upon a time...", "<|endoftext|>", "One day...", ...]
     if special_tokens:
         # e.g. "(<\|endoftext\|>)"; the capture group keeps the special tokens in split() output
         pattern_str = "|".join(re.escape(t) for t in special_tokens)
         special_split_pattern = re.compile(f"({pattern_str})")
+        segments = special_split_pattern.split(text)
+    else:
+        segments = [text]
 
-    with open(input_path, 'rb') as f:
-        f.seek(start)
-        size_to_read = end - start
+    pretoken_pattern = re.compile(PAT)
 
-        if size_to_read <= 0:
-            return word_freqs
+    for segment in segments:
+        # Special tokens are skipped, not pre-tokenized: the regex would split "<|endoftext|>" into
+        # "<|", "endoftext", "|>" and their pairs would leak into merges. They aren't counted either:
+        # they're added to the vocab separately and, as single tokens, have no pairs to merge.
+        if segment and segment not in special_tokens:
+            # e.g. "Once upon a time." -> ["Once", " upon", " a", " time", "."]
+            pretoken_counts.update(pretoken_pattern.findall(segment))
 
-        chunk_bytes = f.read(size_to_read)
-        text = chunk_bytes.decode('utf-8', errors="ignore")
-
-        # segments: text split around special tokens
-        #   e.g. ["Once upon a time...", "<|endoftext|>", "One day...", ...]
-        if special_split_pattern:
-            segments = special_split_pattern.split(text)
-        else:
-            segments = [text]
-
-        for segment in segments:
-            if not segment:
-                continue
-
-            if segment in special_tokens_set:
-                # (don't split into bytes)
-                # e.g., (b'<|endoftext|>',)
-                word_freqs[(segment.encode('utf-8'),)] += 1
-                continue
-
-            # pretokens: e.g. ["Once", " upon", " a", " time", "."]
-            pretokens = pretoken_pattern.findall(segment)
-            word_freqs.update(
-                tuple(bytes([b]) for b in pretoken.encode("utf-8"))
-                for pretoken in pretokens
-            )
-    return word_freqs
+    return pretoken_counts
 
 def merge_word(
         word: Tuple[bytes, ...],
@@ -174,27 +156,30 @@ def train_bpe(
     for start, end in zip(boundaries[:-1], boundaries[1:]):
         chunk_args.append((input_path, start, end, special_tokens))
 
-    # word_freqs: word (tuple of single-byte tokens) -> count over the whole corpus
-    #   e.g. {(b' ', b't', b'h', b'e'): 58210, ...}
-    word_freqs = Counter()
+    # pretoken_counts: pre-token string -> count over the whole corpus, e.g. {" the": 58210, ...}
+    pretoken_counts = Counter()
 
     with multiprocessing.Pool(processes=num_procs) as pool:
-        per_chunk_word_freqs = pool.starmap(process_chunk, chunk_args)
+        # per_chunk_counts: one pre-token Counter per chunk, e.g. [{" the": 5821, ...}, ...]
+        per_chunk_counts = pool.starmap(process_chunk, chunk_args)
 
-        for chunk_word_freqs in per_chunk_word_freqs:
-            word_freqs.update(chunk_word_freqs)
+        for chunk_counts in per_chunk_counts:
+            pretoken_counts.update(chunk_counts)
 
+    # Each distinct pre-token becomes a word with a stable id (its position in these two lists).
     # word_tokens[word_id]: the word's current segmentation, rewritten in place by merges
     # e.g. word_tokens[0] = (b' ', b't', b'h', b'e') -> (b' ', b't', b'he') -> (b' the',)
-    # word_counts[word_id]: how often the word occurs
+    # word_counts[word_id]: how often the word occurs, never changes, e.g. 58210
     word_tokens = []
     word_counts = []
+    # byte_tokens[b]: the single-byte token for byte value b, e.g. byte_tokens[116] = b't'.
+    # Built once and shared by every word, instead of creating a new bytes object per byte.
+    byte_tokens = [bytes([i]) for i in range(256)]
 
-    for word, freq in word_freqs.items():
-        word_tokens.append(word)
-        word_counts.append(freq)
-
-    del word_freqs
+    # Byte conversion happens here, once per distinct pre-token, not once per occurrence
+    for pretoken, count in pretoken_counts.items():
+        word_tokens.append(tuple(byte_tokens[b] for b in pretoken.encode("utf-8")))
+        word_counts.append(count)
 
     # pair_counts: adjacent token pair -> total count across all words, weighted by word count
     #   e.g. {(b' ', b't'): 90210, (b't', b'h'): 71553, ...}
