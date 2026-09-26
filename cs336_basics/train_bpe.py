@@ -3,7 +3,7 @@ import os
 from typing import List, Dict, Tuple, BinaryIO, Optional
 import multiprocessing
 import time
-from collections import Counter
+from collections import Counter, defaultdict
 from pathlib import Path
 import regex as re
 import cProfile
@@ -72,7 +72,9 @@ def process_chunk(
     word_freqs = Counter()
 
     pretoken_pattern = re.compile(PAT)
+    special_tokens_set = set(special_tokens or [])
     special_split_pattern = None
+
     if special_tokens:
         # e.g. "(<\|endoftext\|>)"; the capture group keeps the special tokens in split() output
         pattern_str = "|".join(re.escape(t) for t in special_tokens)
@@ -114,17 +116,6 @@ def process_chunk(
             )
     return word_freqs
 
-def count_pairs(
-        word_freqs: Dict[Tuple[bytes, ...], int]
-) -> Dict[Tuple[bytes, bytes], int]:
-    # pair_counts: adjacent token pair -> total count across all words, weighted by word frequency
-    #   e.g. {(b' ', b't'): 90210, (b't', b'h'): 71553, ...}
-    pair_counts = Counter()
-    for word, freq in word_freqs.items():
-        for i in range(len(word) - 1):
-            pair = (word[i], word[i+1])
-            pair_counts[pair] += freq
-    return pair_counts
 
 def merge_word(
         word: Tuple[bytes, ...],
@@ -175,11 +166,27 @@ def train_bpe(
         for chunk_word_freqs in per_chunk_word_freqs:
             word_freqs.update(chunk_word_freqs)
 
+    words = []
+    freqs = []
+
+    for word, freq in word_freqs.items():
+        words.append(word)
+        freqs.append(freq)
+
+    del word_freqs
+    
+    pair_counts = Counter()
+    index = defaultdict(set)
+
+    for i, word in enumerate(words):
+        freq = freqs[i]
+        for j in range(len(word) - 1):
+            pair = (word[j], word[j+1])
+            pair_counts[pair] += freq
+            index[pair].add(i)
+
     # merges: in order of creation, e.g. [(b' ', b't'), (b'h', b'e'), (b' t', b'he'), ...]
     merges = []
-
-    # pair_counts: e.g. {(b' ', b't'): 90210, ...}, kept up to date after every merge
-    pair_counts = count_pairs(word_freqs)
 
     # vocab_tokens: token id -> token bytes, as a list where the index is the id
     #   e.g. [b'\x00', ..., b'\xff', b'<|endoftext|>', b' t', b'he', ...]
@@ -201,33 +208,28 @@ def train_bpe(
         left, right = best_pair
         vocab_tokens.append(left + right)
 
-        # merged_words: new segmentation -> freq, for words this merge changed
-        #   e.g. {(b' ', b't', b'he'): 58210, ...}
-        # stale_words: the old segmentations they replace, e.g. [(b' ', b't', b'h', b'e'), ...]
-        merged_words = {}
-        stale_words = []
-        for word, freq in word_freqs.items():
-            if left not in word:
+        matched_ids = index.pop(best_pair, set())
+
+        for i in matched_ids:
+            old = words[i]
+            new = merge_word(old, best_pair)
+            if new == old:
                 continue
-            new_word = merge_word(word, best_pair)
 
-            if new_word != word:
-                for j in range(len(word) - 1):
-                    pair = (word[j], word[j+1])
-                    pair_counts[pair] -= freq
-                    if pair_counts[pair] == 0:
-                        del pair_counts[pair]
-                for j in range(len(new_word)-1):
-                    pair = (new_word[j], new_word[j+1])
-                    pair_counts[pair] += freq
-                merged_words[new_word] = freq
-                stale_words.append(word)
+            freq = freqs[i]
+            for j in range(len(old) - 1):
+                pair = (old[j], old[j+1])
+                pair_counts[pair] -= freq
+                if pair_counts[pair] == 0:
+                    del pair_counts[pair]
+                # NOTE: index is not changed here(lazy removal)
 
-        for word in stale_words:
-            del word_freqs[word]
+            for j in range(len(new) - 1):
+                pair = (new[j], new[j+1])
+                pair_counts[pair] += freq
+                index[pair].add(i)
 
-        for word, freq in merged_words.items():
-            word_freqs[word] = freq
+            words[i] = new
 
     # vocab: token id -> token bytes, e.g. {0: b'\x00', ..., 256: b'<|endoftext|>', 257: b' t', ...}
     vocab = {idx: token for idx, token in enumerate(vocab_tokens)}
