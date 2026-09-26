@@ -72,6 +72,7 @@ def process_chunk(
     word_freqs = Counter()
 
     pretoken_pattern = re.compile(PAT)
+    # empty set when there are no special tokens, e.g. {"<|endoftext|>"}
     special_tokens_set = set(special_tokens or [])
     special_split_pattern = None
 
@@ -79,7 +80,6 @@ def process_chunk(
         # e.g. "(<\|endoftext\|>)"; the capture group keeps the special tokens in split() output
         pattern_str = "|".join(re.escape(t) for t in special_tokens)
         special_split_pattern = re.compile(f"({pattern_str})")
-        special_tokens_set = set(special_tokens)
 
     with open(input_path, 'rb') as f:
         f.seek(start)
@@ -115,7 +115,6 @@ def process_chunk(
                 for pretoken in pretokens
             )
     return word_freqs
-
 
 def merge_word(
         word: Tuple[bytes, ...],
@@ -155,9 +154,8 @@ def train_bpe(
     for start, end in zip(boundaries[:-1], boundaries[1:]):
         chunk_args.append((input_path, start, end, special_tokens))
 
-    # word_freqs: word (tuple of tokens) -> count over the whole corpus
-    #   starts as single bytes, e.g. {(b' ', b't', b'h', b'e'): 58210, ...}
-    #   and gets re-segmented as merges happen, e.g. {(b' the',): 58210, ...}
+    # word_freqs: word (tuple of single-byte tokens) -> count over the whole corpus
+    #   e.g. {(b' ', b't', b'h', b'e'): 58210, ...}
     word_freqs = Counter()
 
     with multiprocessing.Pool(processes=num_procs) as pool:
@@ -166,26 +164,32 @@ def train_bpe(
         for chunk_word_freqs in per_chunk_word_freqs:
             word_freqs.update(chunk_word_freqs)
 
-    words = []
-    freqs = []
+    # word_tokens[word_id]: the word's current segmentation, rewritten in place by merges
+    # e.g. word_tokens[0] = (b' ', b't', b'h', b'e') -> (b' ', b't', b'he') -> (b' the',)
+    # word_counts[word_id]: how often the word occurs
+    word_tokens = []
+    word_counts = []
 
     for word, freq in word_freqs.items():
-        words.append(word)
-        freqs.append(freq)
+        word_tokens.append(word)
+        word_counts.append(freq)
 
     del word_freqs
-    
+
+    # pair_counts: adjacent token pair -> total count across all words, weighted by word count
+    #   e.g. {(b' ', b't'): 90210, (b't', b'h'): 71553, ...}
     pair_counts = Counter()
-    index = defaultdict(set)
+    # pair_to_word_ids: pair -> ids of words that contain it (or used to; see lazy removal below)
+    #   e.g. {(b't', b'h'): {0, 1, 57}, ...}
+    pair_to_word_ids = defaultdict(set)
 
-    for i, word in enumerate(words):
-        freq = freqs[i]
-        for j in range(len(word) - 1):
-            pair = (word[j], word[j+1])
-            pair_counts[pair] += freq
-            index[pair].add(i)
+    for word_id, tokens in enumerate(word_tokens):
+        count = word_counts[word_id]
+        for pos in range(len(tokens) - 1):
+            pair = (tokens[pos], tokens[pos+1])
+            pair_counts[pair] += count
+            pair_to_word_ids[pair].add(word_id)
 
-    # merges: in order of creation, e.g. [(b' ', b't'), (b'h', b'e'), (b' t', b'he'), ...]
     merges = []
 
     # vocab_tokens: token id -> token bytes, as a list where the index is the id
@@ -199,7 +203,6 @@ def train_bpe(
     for _ in range(num_merges):
         if not pair_counts:
             break
-        # most frequent pair; ties go to the lexicographically greatest pair
         best_pair = max(pair_counts, key=lambda x: (pair_counts[x], x))
         if pair_counts[best_pair] < 1:
             break
@@ -208,28 +211,31 @@ def train_bpe(
         left, right = best_pair
         vocab_tokens.append(left + right)
 
-        matched_ids = index.pop(best_pair, set())
+        candidate_ids = pair_to_word_ids.pop(best_pair, set())
 
-        for i in matched_ids:
-            old = words[i]
-            new = merge_word(old, best_pair)
-            if new == old:
+        for word_id in candidate_ids:
+            old_tokens = word_tokens[word_id]
+            new_tokens = merge_word(old_tokens, best_pair)
+            # lazy removal: the index is never cleaned up when a word loses a pair, so a candidate
+            # may no longer contain best_pair
+            if new_tokens == old_tokens:
                 continue
 
-            freq = freqs[i]
-            for j in range(len(old) - 1):
-                pair = (old[j], old[j+1])
-                pair_counts[pair] -= freq
+            count = word_counts[word_id]
+            # remove this word's old pairs
+            for pos in range(len(old_tokens) - 1):
+                pair = (old_tokens[pos], old_tokens[pos+1])
+                pair_counts[pair] -= count
                 if pair_counts[pair] == 0:
                     del pair_counts[pair]
-                # NOTE: index is not changed here(lazy removal)
 
-            for j in range(len(new) - 1):
-                pair = (new[j], new[j+1])
-                pair_counts[pair] += freq
-                index[pair].add(i)
+            # add its new ones, registering the word under each new pair
+            for pos in range(len(new_tokens) - 1):
+                pair = (new_tokens[pos], new_tokens[pos+1])
+                pair_counts[pair] += count
+                pair_to_word_ids[pair].add(word_id)
 
-            words[i] = new
+            word_tokens[word_id] = new_tokens
 
     # vocab: token id -> token bytes, e.g. {0: b'\x00', ..., 256: b'<|endoftext|>', 257: b' t', ...}
     vocab = {idx: token for idx, token in enumerate(vocab_tokens)}
