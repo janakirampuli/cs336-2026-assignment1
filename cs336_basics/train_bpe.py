@@ -11,6 +11,7 @@ import pstats
 import json
 
 
+# GPT-2 pre-tokenization regex: splits text into pre-tokens like "Hello", " world", "!", "\n\n"
 PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
 
 
@@ -66,13 +67,16 @@ def process_chunk(
         end: int,
         special_tokens: Optional[List[str]]
 ) -> Counter:
-    word_freq = Counter()
+    # word_freqs: pre-token (as a tuple of single-byte tokens) -> count in this chunk
+    #   e.g. {(b' ', b't', b'h', b'e'): 5821, (b'<|endoftext|>',): 312, ...}
+    word_freqs = Counter()
 
-    splitter = re.compile(PAT)
-    special_token_split_pattern = None
+    pretoken_pattern = re.compile(PAT)
+    special_split_pattern = None
     if special_tokens:
+        # e.g. "(<\|endoftext\|>)"; the capture group keeps the special tokens in split() output
         pattern_str = "|".join(re.escape(t) for t in special_tokens)
-        special_token_split_pattern = re.compile(f"({pattern_str})")
+        special_split_pattern = re.compile(f"({pattern_str})")
         special_tokens_set = set(special_tokens)
 
     with open(input_path, 'rb') as f:
@@ -80,16 +84,18 @@ def process_chunk(
         size_to_read = end - start
 
         if size_to_read <= 0:
-            return word_freq
-        
-        chunk = f.read(size_to_read)
-        text = chunk.decode('utf-8', errors="ignore")
+            return word_freqs
 
-        if special_token_split_pattern:
-            segments = special_token_split_pattern.split(text)
+        chunk_bytes = f.read(size_to_read)
+        text = chunk_bytes.decode('utf-8', errors="ignore")
+
+        # segments: text split around special tokens
+        #   e.g. ["Once upon a time...", "<|endoftext|>", "One day...", ...]
+        if special_split_pattern:
+            segments = special_split_pattern.split(text)
         else:
             segments = [text]
-        
+
         for segment in segments:
             if not segment:
                 continue
@@ -97,37 +103,41 @@ def process_chunk(
             if segment in special_tokens_set:
                 # (don't split into bytes)
                 # e.g., (b'<|endoftext|>',)
-                word_freq[ (segment.encode('utf-8'),) ] += 1
+                word_freqs[(segment.encode('utf-8'),)] += 1
                 continue
-            
-            words = splitter.findall(segment)
-            word_freq.update(
-                tuple(bytes([b]) for b in word.encode("utf-8"))
-                for word in words
-            )
-    return word_freq
 
-def get_stats(
-        vocab: Dict[Tuple[bytes, ...], int]
+            # pretokens: e.g. ["Once", " upon", " a", " time", "."]
+            pretokens = pretoken_pattern.findall(segment)
+            word_freqs.update(
+                tuple(bytes([b]) for b in pretoken.encode("utf-8"))
+                for pretoken in pretokens
+            )
+    return word_freqs
+
+def count_pairs(
+        word_freqs: Dict[Tuple[bytes, ...], int]
 ) -> Dict[Tuple[bytes, bytes], int]:
-    pairs = Counter()
-    for word_tuple, freq in vocab.items():
-        for i in range(len(word_tuple) - 1):
-            pair = (word_tuple[i], word_tuple[i+1])
-            pairs[pair] += freq
-    return pairs
+    # pair_counts: adjacent token pair -> total count across all words, weighted by word frequency
+    #   e.g. {(b' ', b't'): 90210, (b't', b'h'): 71553, ...}
+    pair_counts = Counter()
+    for word, freq in word_freqs.items():
+        for i in range(len(word) - 1):
+            pair = (word[i], word[i+1])
+            pair_counts[pair] += freq
+    return pair_counts
 
 def merge_word(
         word: Tuple[bytes, ...],
         pair: Tuple[bytes, bytes]
 ) -> Tuple[bytes, ...]:
+    # e.g. word=(b' ', b't', b'h', b'e'), pair=(b'h', b'e') -> (b' ', b't', b'he')
     new_word = []
-    p0, p1 = pair
-    merged_byte = p0 + p1
+    left, right = pair
+    merged_token = left + right
     i = 0
     while i < len(word):
-        if i < len(word) - 1 and word[i] == p0 and word[i+1] == p1:
-            new_word.append(merged_byte)
+        if i < len(word) - 1 and word[i] == left and word[i+1] == right:
+            new_word.append(merged_token)
             i += 2
         else:
             new_word.append(word[i])
@@ -138,89 +148,107 @@ def merge_word(
 def train_bpe(
         input_path: str,
         vocab_size: int,
-        special_tokens: List['str']
+        special_tokens: List[str]
 ) -> Tuple[Dict[int, bytes], List[Tuple[bytes, bytes]]]:
 
     num_procs = os.cpu_count()
 
+    # boundaries: byte offsets of chunk edges, each chunk starting at a special token
+    #   e.g. [0, 2181423, 4362931, ..., file_size]
     with open(input_path, 'rb') as f:
         boundaries = find_chunk_boundaries(f, num_procs, b"<|endoftext|>")
 
-    process_chunk_args = []
+    # chunk_args: one (input_path, start, end, special_tokens) tuple per worker
+    chunk_args = []
 
     for start, end in zip(boundaries[:-1], boundaries[1:]):
-        process_chunk_args.append((input_path, start, end, special_tokens))
+        chunk_args.append((input_path, start, end, special_tokens))
 
+    # word_freqs: word (tuple of tokens) -> count over the whole corpus
+    #   starts as single bytes, e.g. {(b' ', b't', b'h', b'e'): 58210, ...}
+    #   and gets re-segmented as merges happen, e.g. {(b' the',): 58210, ...}
     word_freqs = Counter()
 
     with multiprocessing.Pool(processes=num_procs) as pool:
-        chunk_freqs = pool.starmap(process_chunk, process_chunk_args)
+        per_chunk_word_freqs = pool.starmap(process_chunk, chunk_args)
 
-        for freq in chunk_freqs:
-            word_freqs.update(freq)
+        for chunk_word_freqs in per_chunk_word_freqs:
+            word_freqs.update(chunk_word_freqs)
 
-    vocab = word_freqs.copy()
+    # merges: in order of creation, e.g. [(b' ', b't'), (b'h', b'e'), (b' t', b'he'), ...]
     merges = []
 
-    pairs_freq = get_stats(vocab)
+    # pair_counts: e.g. {(b' ', b't'): 90210, ...}, kept up to date after every merge
+    pair_counts = count_pairs(word_freqs)
 
-    vocab_list = [bytes([i]) for i in range(256)]
-    for st in special_tokens:
-        vocab_list.append(st.encode("utf-8"))
+    # vocab_tokens: token id -> token bytes, as a list where the index is the id
+    #   e.g. [b'\x00', ..., b'\xff', b'<|endoftext|>', b' t', b'he', ...]
+    vocab_tokens = [bytes([i]) for i in range(256)]
+    for token in special_tokens:
+        vocab_tokens.append(token.encode("utf-8"))
 
-    num_merges = vocab_size - len(vocab_list)
+    num_merges = vocab_size - len(vocab_tokens)
 
-    for i in range(num_merges):
-        if not pairs_freq:
+    for _ in range(num_merges):
+        if not pair_counts:
             break
-        best_pair = max(pairs_freq, key=lambda x: (pairs_freq[x], x))
-        if pairs_freq[best_pair] < 1:
+        # most frequent pair; ties go to the lexicographically greatest pair
+        best_pair = max(pair_counts, key=lambda x: (pair_counts[x], x))
+        if pair_counts[best_pair] < 1:
             break
 
         merges.append(best_pair)
-        p0, p1 = best_pair
-        vocab_list.append(p0 + p1)
-        new_vocab = {}
+        left, right = best_pair
+        vocab_tokens.append(left + right)
 
-        for word, freq in vocab.items():
-            if p0 not in word:
-                new_vocab[word] = freq
+        # merged_words: new segmentation -> freq, for words this merge changed
+        #   e.g. {(b' ', b't', b'he'): 58210, ...}
+        # stale_words: the old segmentations they replace, e.g. [(b' ', b't', b'h', b'e'), ...]
+        merged_words = {}
+        stale_words = []
+        for word, freq in word_freqs.items():
+            if left not in word:
                 continue
             new_word = merge_word(word, best_pair)
 
             if new_word != word:
                 for j in range(len(word) - 1):
                     pair = (word[j], word[j+1])
-                    pairs_freq[pair] -= freq
-                    if pairs_freq[pair] == 0:
-                        del pairs_freq[pair]
+                    pair_counts[pair] -= freq
+                    if pair_counts[pair] == 0:
+                        del pair_counts[pair]
                 for j in range(len(new_word)-1):
                     pair = (new_word[j], new_word[j+1])
-                    pairs_freq[pair] += freq
+                    pair_counts[pair] += freq
+                merged_words[new_word] = freq
+                stale_words.append(word)
 
-                new_vocab[new_word] = freq
-            else:
-                new_vocab[word] = freq
-        vocab = new_vocab
+        for word in stale_words:
+            del word_freqs[word]
 
-    vocab_map = {idx: token for idx, token in enumerate(vocab_list)}
-    return vocab_map, merges
+        for word, freq in merged_words.items():
+            word_freqs[word] = freq
+
+    # vocab: token id -> token bytes, e.g. {0: b'\x00', ..., 256: b'<|endoftext|>', 257: b' t', ...}
+    vocab = {idx: token for idx, token in enumerate(vocab_tokens)}
+    return vocab, merges
 
 def save_to_disk(
-        vocab: Dict[int, bytes], 
-        merges: List[Tuple[bytes, bytes]], 
-        vocab_path="vocab.json", 
+        vocab: Dict[int, bytes],
+        merges: List[Tuple[bytes, bytes]],
+        vocab_path="vocab.json",
         merges_path="merges.txt"
 ):
-    vocab_str_map = {
+    # vocab_strs: token id -> token as text (lossy: invalid UTF-8 bytes become U+FFFD)
+    vocab_strs = {
         k: v.decode('utf-8', errors='replace') for k, v in vocab.items()
     }
     with open(vocab_path, "w", encoding="utf-8") as f:
-        json.dump(vocab_str_map, f, indent=2, ensure_ascii=False)
-        
+        json.dump(vocab_strs, f, indent=2, ensure_ascii=False)
+
     with open(merges_path, "w", encoding="utf-8") as f:
-        for p1, p2 in merges:
-            f.write(f"{p1.decode('utf-8', errors='replace')} {p2.decode('utf-8', errors='replace')}\n")
+        for left, right in merges:
+            f.write(f"{left.decode('utf-8', errors='replace')} {right.decode('utf-8', errors='replace')}\n")
 
 
 def main():
