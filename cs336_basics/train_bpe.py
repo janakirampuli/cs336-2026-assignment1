@@ -9,10 +9,30 @@ import regex as re
 import cProfile
 import pstats
 import json
+import heapq
 
 
 # GPT-2 pre-tokenization regex: splits text into pre-tokens like "Hello", " world", "!", "\n\n"
 PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+
+class ReversedPair:
+    """Wraps a pair so it sorts in reverse: ReversedPair(a) < ReversedPair(b) iff a > b.
+
+    heapq is a min-heap, and on count ties we want the lexicographically greatest pair
+    first. Counts can be negated but bytes can't, so the pair is wrapped instead.
+    e.g. heap entries (-7, ReversedPair((b't', b'h'))) and (-7, ReversedPair((b' ', b't'))):
+    (b't', b'h') > (b' ', b't'), so (b't', b'h') pops first.
+    """
+    __slots__ = ("pair",)  # no per-instance __dict__: less memory for many heap entries
+
+    def __init__(self, pair):
+        self.pair = pair
+
+    def __lt__(self, other):
+        return self.pair > other.pair
+
+    def __eq__(self, other):
+        return self.pair == other.pair
 
 
 def find_chunk_boundaries(
@@ -190,6 +210,9 @@ def train_bpe(
             pair_counts[pair] += count
             pair_to_word_ids[pair].add(word_id)
 
+    pair_heap = [(-count, ReversedPair(pair)) for pair, count in pair_counts.items()]
+    heapq.heapify(pair_heap)  # O(n), cheaper than n pushes
+
     merges = []
 
     # vocab_tokens: token id -> token bytes, as a list where the index is the id
@@ -201,16 +224,23 @@ def train_bpe(
     num_merges = vocab_size - len(vocab_tokens)
 
     for _ in range(num_merges):
-        if not pair_counts:
-            break
-        best_pair = max(pair_counts, key=lambda x: (pair_counts[x], x))
-        if pair_counts[best_pair] < 1:
+        best_pair = None
+        while pair_heap:
+            neg_count, wrapped = heapq.heappop(pair_heap)
+            pair = wrapped.pair
+            if pair_counts.get(pair) == -neg_count:
+                best_pair = pair
+                break
+        if best_pair is None:
             break
 
         merges.append(best_pair)
-        left, right = best_pair
-        vocab_tokens.append(left + right)
+        vocab_tokens.append(best_pair[0] + best_pair[1])
 
+        # changed_pairs: every pair whose count went up or down during this merge,
+        #   e.g. {(b' ', b't'), (b'h', b'e'), (b' ', b'th'), (b'th', b'e')}
+        changed_pairs = set()
+        # candidate_ids: words listed under best_pair, e.g. {0, 1, 57}
         candidate_ids = pair_to_word_ids.pop(best_pair, set())
 
         for word_id in candidate_ids:
@@ -228,14 +258,21 @@ def train_bpe(
                 pair_counts[pair] -= count
                 if pair_counts[pair] == 0:
                     del pair_counts[pair]
+                changed_pairs.add(pair)
 
             # add its new ones, registering the word under each new pair
             for pos in range(len(new_tokens) - 1):
                 pair = (new_tokens[pos], new_tokens[pos+1])
                 pair_counts[pair] += count
                 pair_to_word_ids[pair].add(word_id)
+                changed_pairs.add(pair)
 
             word_tokens[word_id] = new_tokens
+
+        for pair in changed_pairs:
+            count = pair_counts.get(pair)
+            if count:
+                heapq.heappush(pair_heap, (-count, ReversedPair(pair)))
 
     # vocab: token id -> token bytes, e.g. {0: b'\x00', ..., 256: b'<|endoftext|>', 257: b' t', ...}
     vocab = {idx: token for idx, token in enumerate(vocab_tokens)}
