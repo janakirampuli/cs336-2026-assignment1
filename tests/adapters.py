@@ -32,7 +32,7 @@ def run_linear(
     """
 
     linear = Linear(in_features=d_in, out_features=d_out, device=weights.device, dtype=weights.dtype)
-    state_dict = OrderedDict([('W', weights)])
+    state_dict = OrderedDict([("weight", weights)])
     linear.load_state_dict(state_dict)
     return linear.forward(in_features)
 
@@ -56,7 +56,7 @@ def run_embedding(
     """
 
     embedding = Embedding(num_embeddings=vocab_size, embedding_dim=d_model, device=weights.device, dtype=weights.dtype)
-    state_dict = OrderedDict([("W_e", weights)])
+    state_dict = OrderedDict([("weight", weights)])
     embedding.load_state_dict(state_dict)
     return embedding.forward(token_ids)
 
@@ -90,7 +90,12 @@ def run_swiglu(
     # swiglu.w1.weight.data = w1_weight
     # swiglu.w2.weight.data = w2_weight
     # swiglu.w3.weight.data = w3_weight
-    raise NotImplementedError
+    swiglu = SwiGLU(d_model=d_model, d_ff=d_ff, device=w1_weight.device, dtype=w1_weight.dtype)
+    state_dict = OrderedDict(
+        [("w1.weight", w1_weight), ("w2.weight", w2_weight), ("w3.weight", w3_weight)]
+    )
+    swiglu.load_state_dict(state_dict)
+    return swiglu.forward(in_features)
 
 
 def run_scaled_dot_product_attention(
@@ -385,7 +390,10 @@ def run_rmsnorm(
         Float[Tensor,"... d_model"]: Tensor of with the same shape as `in_features` with the output of running
         RMSNorm of the `in_features`.
     """
-    raise NotImplementedError
+    rms_norm = RMSNorm(d_model=d_model, eps=eps, device=weights.device, dtype=weights.dtype)
+    state_dict = OrderedDict([("weight", weights)])
+    rms_norm.load_state_dict(state_dict)
+    return rms_norm.forward(in_features)
 
 
 def run_silu(in_features: Float[Tensor, " ..."]) -> Float[Tensor, " ..."]:
@@ -399,7 +407,7 @@ def run_silu(in_features: Float[Tensor, " ..."]) -> Float[Tensor, " ..."]:
         Float[Tensor,"..."]: of with the same shape as `in_features` with the output of applying
         SiLU to each element.
     """
-    raise NotImplementedError
+    return silu(in_features)
 
 
 def run_get_batch(
