@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Iterable
-from typing import IO, Any, BinaryIO
+from typing import IO, Any, BinaryIO, OrderedDict
 
 import numpy.typing as npt
 import torch
@@ -31,8 +31,10 @@ def run_linear(
         Float[Tensor, "... d_out"]: The transformed output of your linear module.
     """
 
-    raise NotImplementedError
-
+    linear = Linear(in_features=d_in, out_features=d_out, device=weights.device, dtype=weights.dtype)
+    state_dict = OrderedDict([('W', weights)])
+    linear.load_state_dict(state_dict)
+    return linear.forward(in_features)
 
 def run_embedding(
     vocab_size: int,

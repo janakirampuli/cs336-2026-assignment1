@@ -7,3 +7,4 @@ except importlib.metadata.PackageNotFoundError:
 
 from .train_bpe import train_bpe
 from .tokenizer import Tokenizer
+from .linear import Linear
