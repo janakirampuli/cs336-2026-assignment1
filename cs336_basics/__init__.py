@@ -12,3 +12,4 @@ from .embedding import Embedding
 from .rmsnorm import RMSNorm
 from .swiglu import SwiGLU
 from .silu import silu
+from .rope import RotaryPositionalEmbedding
