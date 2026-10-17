@@ -23,9 +23,11 @@ def save_checkpoint(
 def load_checkpoint(
         src: str | os.PathLike | BinaryIO | IO[bytes],
         model: torch.nn.Module,
-        optimizer: torch.optim.Optimizer
+        optimizer: torch.optim.Optimizer | None = None
 ) -> int:
-    checkpoint_state = torch.load(src)
+    # load onto cpu so a checkpoint trained on cuda opens on a machine without it;
+    # load_state_dict then copies tensors to wherever the model lives
+    checkpoint_state = torch.load(src, map_location='cpu')
 
     # strip the prefix from older checkpoints saved straight from a compiled model
     state_dict = checkpoint_state['model_state_dict']
@@ -37,5 +39,6 @@ def load_checkpoint(
 
     unwrapped_model = getattr(model, '_orig_mod', model)
     unwrapped_model.load_state_dict(state_dict)
-    optimizer.load_state_dict(checkpoint_state['optimizer_state_dict'])
+    if optimizer is not None:
+        optimizer.load_state_dict(checkpoint_state['optimizer_state_dict'])
     return checkpoint_state['iteration']
