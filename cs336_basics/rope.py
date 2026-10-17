@@ -1,9 +1,6 @@
 import torch
 from torch import nn
-from torch import einsum
 import einops
-from typing import Optional
-import math
 
 class RotaryPositionalEmbedding(nn.Module):
     def __init__(

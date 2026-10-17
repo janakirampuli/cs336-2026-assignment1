@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 from torch import einsum
-from typing import Optional
 import math
 
 class Linear(nn.Module):
@@ -9,8 +8,8 @@ class Linear(nn.Module):
             self,
             in_features: int,
             out_features: int,
-            device: Optional[torch.device] = None,
-            dtype: Optional[torch.dtype] = None
+            device: torch.device | None = None,
+            dtype: torch.dtype | None = None
     ):
         super().__init__()
 

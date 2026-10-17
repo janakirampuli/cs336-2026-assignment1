@@ -87,12 +87,12 @@ class Tokenizer:
         merges_filepath: str,
         special_tokens: list[str] | None = None,
     ) -> "Tokenizer":
-        with open(vocab_filepath, 'r') as f:
+        with open(vocab_filepath) as f:
             vocab_strs = json.load(f)
         vocab = {int(token_id): token.encode("utf-8") for token_id, token in vocab_strs.items()}
 
         merges = []
-        with open(merges_filepath, "r", encoding="utf-8") as f:
+        with open(merges_filepath, encoding="utf-8") as f:
             for line in f:
                 line = line.rstrip("\n")
                 if not line:

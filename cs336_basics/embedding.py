@@ -1,14 +1,13 @@
 import torch
 from torch import nn
-from typing import Optional
 
 class Embedding(nn.Module):
     def __init__(
             self,
             num_embeddings: int,
             embedding_dim: int,
-            device: Optional[torch.device] = None,
-            dtype: Optional[torch.dtype] = None
+            device: torch.device | None = None,
+            dtype: torch.dtype | None = None
     ):
         super().__init__()
         self.num_embeddings = num_embeddings

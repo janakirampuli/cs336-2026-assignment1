@@ -1,7 +1,5 @@
 import torch
 import torch.nn as nn
-from torch import einsum
-from typing import Optional
 from .rmsnorm import RMSNorm
 from .multihead_self_attention import CausalSelfAttention
 from .swiglu import SwiGLU
@@ -14,8 +12,8 @@ class TransformerBlock(nn.Module):
             d_ff: int,
             theta: float=10000.0,
             max_seq_len: int=4096,
-            device: Optional[torch.device]=None,
-            dtype: Optional[torch.dtype]=None
+            device: torch.device | None=None,
+            dtype: torch.dtype | None=None
     ):
         super().__init__()
         self.ln1 = RMSNorm(d_model=d_model, device=device, dtype=dtype)

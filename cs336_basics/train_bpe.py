@@ -1,6 +1,6 @@
 import argparse
 import os
-from typing import List, Dict, Tuple, BinaryIO, Optional
+from typing import BinaryIO
 import multiprocessing
 import time
 from collections import Counter, defaultdict
@@ -85,7 +85,7 @@ def process_chunk(
         input_path: str,
         start: int,
         end: int,
-        special_tokens: Optional[List[str]]
+        special_tokens: list[str] | None
 ) -> Counter:
     # pretoken_counts: pre-token string -> count in this chunk, e.g. {" the": 5821, " cat": 310, ...}
     # Kept as strings (cheap to hash and to send back to the main process); they're converted to
@@ -119,9 +119,9 @@ def process_chunk(
     return pretoken_counts
 
 def merge_word(
-        word: Tuple[bytes, ...],
-        pair: Tuple[bytes, bytes]
-) -> Tuple[bytes, ...]:
+        word: tuple[bytes, ...],
+        pair: tuple[bytes, bytes]
+) -> tuple[bytes, ...]:
     # e.g. word=(b' ', b't', b'h', b'e'), pair=(b'h', b'e') -> (b' ', b't', b'he')
     new_word = []
     left, right = pair
@@ -140,8 +140,8 @@ def merge_word(
 def train_bpe(
         input_path: str,
         vocab_size: int,
-        special_tokens: List[str]
-) -> Tuple[Dict[int, bytes], List[Tuple[bytes, bytes]]]:
+        special_tokens: list[str]
+) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
 
     num_procs = os.cpu_count()
 
@@ -266,8 +266,8 @@ def train_bpe(
     return vocab, merges
 
 def save_to_disk(
-        vocab: Dict[int, bytes],
-        merges: List[Tuple[bytes, bytes]],
+        vocab: dict[int, bytes],
+        merges: list[tuple[bytes, bytes]],
         vocab_path="vocab.json",
         merges_path="merges.txt"
 ):

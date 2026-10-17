@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-from typing import Optional
 from .linear import Linear
 
 class SwiGLU(nn.Module):
@@ -8,8 +7,8 @@ class SwiGLU(nn.Module):
             self,
             d_model: int,
             d_ff: int,
-            device: Optional[torch.device],
-            dtype: Optional[torch.dtype]
+            device: torch.device | None,
+            dtype: torch.dtype | None
     ):
         super().__init__()
         self.d_model = d_model

@@ -1,9 +1,6 @@
 import torch
 import torch.nn as nn
-from torch import einsum
-from typing import Optional
 import einops
-from .softmax import softmax
 from .linear import Linear
 from .rope import RotaryPositionalEmbedding
 from .scaled_dot_product_attention import scaled_dot_product_attention
@@ -13,8 +10,8 @@ class CausalSelfAttention(nn.Module):
             self,
             d_model: int,
             num_heads: int,
-            device: Optional[torch.device]=None,
-            dtype: Optional[torch.dtype]=None,
+            device: torch.device | None=None,
+            dtype: torch.dtype | None=None,
             theta: float = 10000.0,
             max_seq_len: int = 4096,
             use_rope: bool = True,
@@ -37,7 +34,7 @@ class CausalSelfAttention(nn.Module):
     def forward(
             self,
             x: torch.Tensor,
-            token_positions: Optional[torch.Tensor]=None
+            token_positions: torch.Tensor | None=None
     ) -> torch.Tensor:
         batch_size, seq_len, _ = x.shape
         qkv = self.qkv_proj(x)

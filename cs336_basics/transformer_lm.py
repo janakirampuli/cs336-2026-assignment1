@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-from typing import Optional
 from .embedding import Embedding
 from .transformer_block import TransformerBlock
 from .rmsnorm import RMSNorm
@@ -16,8 +15,8 @@ class TransformerLM(nn.Module):
             num_heads: int,
             d_ff: int,
             theta: float=10000.0,
-            device: Optional[torch.device]=None,
-            dtype: Optional[torch.dtype]=None
+            device: torch.device | None=None,
+            dtype: torch.dtype | None=None
     ):
         super().__init__()
 
