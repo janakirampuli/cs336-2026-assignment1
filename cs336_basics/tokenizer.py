@@ -1,5 +1,6 @@
 import json
 from collections.abc import Iterable, Iterator
+from functools import lru_cache
 
 import regex as re
 
@@ -7,6 +8,47 @@ import regex as re
 PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
 
 byte_tokens = [bytes([i]) for i in range(256)]
+
+
+@lru_cache
+def bytes_to_unicode() -> dict[int, str]:
+    """Map every byte 0..255 to a printable character (the GPT-2 vocab/merges file format).
+
+    Printable bytes keep their own character, e.g. 33 -> '!'. The other 68 (whitespace,
+    control and non-ASCII bytes) are shifted to chr(256 + n), e.g. 32 (space) -> 'Ġ'.
+    Every token then has a lossless text form with no spaces in it, so a merges line
+    "Ġ t" always splits into exactly two tokens.
+    """
+    printable = (
+        list(range(ord("!"), ord("~") + 1))
+        + list(range(ord("¡"), ord("¬") + 1))
+        + list(range(ord("®"), ord("ÿ") + 1))
+    )
+    byte_to_char = {b: chr(b) for b in printable}
+    n = 0
+    for b in range(256):
+        if b not in byte_to_char:
+            byte_to_char[b] = chr(256 + n)
+            n += 1
+    return byte_to_char
+
+
+@lru_cache
+def unicode_to_bytes() -> dict[str, int]:
+    # inverse of bytes_to_unicode, e.g. 'Ġ' -> 32
+    return {char: b for b, char in bytes_to_unicode().items()}
+
+
+def token_to_str(token: bytes) -> str:
+    # e.g. b' the' -> 'Ġthe', b'\xe2' -> 'â'
+    byte_to_char = bytes_to_unicode()
+    return "".join(byte_to_char[b] for b in token)
+
+
+def str_to_token(token_str: str) -> bytes:
+    # inverse of token_to_str, e.g. 'Ġthe' -> b' the'
+    char_to_byte = unicode_to_bytes()
+    return bytes(char_to_byte[char] for char in token_str)
 
 def merge_word(
         word: tuple[bytes, ...],
@@ -87,20 +129,27 @@ class Tokenizer:
         merges_filepath: str,
         special_tokens: list[str] | None = None,
     ) -> "Tokenizer":
-        with open(vocab_filepath) as f:
-            vocab_strs = json.load(f)
-        vocab = {int(token_id): token.encode("utf-8") for token_id, token in vocab_strs.items()}
+        """Load a tokenizer saved in the GPT-2 format (see bytes_to_unicode).
+
+        vocab file: JSON of token string -> id, e.g. {"Ġthe": 262, ...}
+        merges file: one merge per line, e.g. "Ġ t"
+        """
+        with open(vocab_filepath, encoding="utf-8") as f:
+            token_str_to_id = json.load(f)
+        vocab = {token_id: str_to_token(token_str) for token_str, token_id in token_str_to_id.items()}
 
         merges = []
         with open(merges_filepath, encoding="utf-8") as f:
-            for line in f:
+            for line_num, line in enumerate(f, start=1):
                 line = line.rstrip("\n")
-                if not line:
+                # GPT-2's own merges file starts with a "#version" header
+                if not line or line.startswith("#version"):
                     continue
 
                 parts = line.split(" ")
-                if len(parts) == 2:
-                    merges.append((parts[0].encode("utf-8"), parts[1].encode("utf-8")))
+                if len(parts) != 2:
+                    raise ValueError(f"{merges_filepath}:{line_num}: expected 2 tokens, got {line!r}")
+                merges.append((str_to_token(parts[0]), str_to_token(parts[1])))
 
         return cls(vocab, merges, special_tokens)
 

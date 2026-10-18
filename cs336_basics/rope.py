@@ -7,7 +7,8 @@ class RotaryPositionalEmbedding(nn.Module):
             self,
             theta: float,
             d_k: int,
-            max_seq_len: int
+            max_seq_len: int,
+            device: torch.device | None = None
     ):
         super().__init__()
         self.theta = theta
@@ -21,8 +22,8 @@ class RotaryPositionalEmbedding(nn.Module):
         cos_cache = angles.cos()
         sin_cache = angles.sin()
 
-        self.register_buffer("cos_cache", cos_cache, persistent=False)
-        self.register_buffer("sin_cache", sin_cache, persistent=False)
+        self.register_buffer("cos_cache", cos_cache.to(device), persistent=False)
+        self.register_buffer("sin_cache", sin_cache.to(device), persistent=False)
 
     def forward(
             self,

@@ -10,28 +10,25 @@ import torch
 from jaxtyping import Bool, Float, Int
 from torch import Tensor
 
-from cs336_basics import (
-    AdamW,
-    CausalSelfAttention,
-    Embedding,
-    Linear,
-    RMSNorm,
-    RotaryPositionalEmbedding,
-    SwiGLU,
-    Tokenizer,
-    TransformerBlock,
-    TransformerLM,
-    cross_entropy,
-    get_batch,
-    get_lr_cosine_schedule,
-    gradient_clipping,
-    load_checkpoint,
-    save_checkpoint,
-    scaled_dot_product_attention,
-    silu,
-    softmax,
-    train_bpe,
-)
+from cs336_basics.adamw import AdamW
+from cs336_basics.checkpointing import load_checkpoint, save_checkpoint
+from cs336_basics.cross_entropy import cross_entropy
+from cs336_basics.data_loading import get_batch
+from cs336_basics.embedding import Embedding
+from cs336_basics.gradient_clipping import gradient_clipping
+from cs336_basics.linear import Linear
+from cs336_basics.lr_schedule import get_lr_cosine_schedule
+from cs336_basics.multihead_self_attention import CausalSelfAttention
+from cs336_basics.rmsnorm import RMSNorm
+from cs336_basics.rope import RotaryPositionalEmbedding
+from cs336_basics.scaled_dot_product_attention import scaled_dot_product_attention
+from cs336_basics.silu import silu
+from cs336_basics.softmax import softmax
+from cs336_basics.swiglu import SwiGLU
+from cs336_basics.tokenizer import Tokenizer
+from cs336_basics.train_bpe import train_bpe
+from cs336_basics.transformer_block import TransformerBlock
+from cs336_basics.transformer_lm import TransformerLM
 
 
 def run_linear(

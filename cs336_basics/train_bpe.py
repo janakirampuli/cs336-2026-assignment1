@@ -11,6 +11,8 @@ import pstats
 import json
 import heapq
 
+from .tokenizer import token_to_str
+
 
 # GPT-2 pre-tokenization regex: splits text into pre-tokens like "Hello", " world", "!", "\n\n"
 PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
@@ -271,27 +273,34 @@ def save_to_disk(
         vocab_path="vocab.json",
         merges_path="merges.txt"
 ):
-    # vocab_strs: token id -> token as text (lossy: invalid UTF-8 bytes become U+FFFD)
-    vocab_strs = {
-        k: v.decode('utf-8', errors='replace') for k, v in vocab.items()
-    }
+    # GPT-2 format, lossless for any bytes (see tokenizer.bytes_to_unicode)
+    # token_str_to_id: token as text -> id, e.g. {"Ġthe": 262, ...}
+    token_str_to_id = {token_to_str(token): token_id for token_id, token in vocab.items()}
     with open(vocab_path, "w", encoding="utf-8") as f:
-        json.dump(vocab_strs, f, indent=2, ensure_ascii=False)
+        json.dump(token_str_to_id, f, indent=2, ensure_ascii=False)
 
+    # one merge per line, e.g. "Ġ t"; mapped tokens never contain a space
     with open(merges_path, "w", encoding="utf-8") as f:
         for left, right in merges:
-            f.write(f"{left.decode('utf-8', errors='replace')} {right.decode('utf-8', errors='replace')}\n")
+            f.write(f"{token_to_str(left)} {token_to_str(right)}\n")
 
 
 def main():
     parser = argparse.ArgumentParser(description="Train a BPE tokenizer")
+    parser.add_argument("--input_path", type=str, default="data/TinyStoriesV2-GPT4-train.txt",
+                        help="text file to train on")
+    parser.add_argument("--vocab_size", type=int, default=10000,
+                        help="final vocab size, including the 256 bytes and special tokens")
+    parser.add_argument("--special_tokens", type=str, nargs="*", default=["<|endoftext|>"],
+                        help="special tokens, e.g. --special_tokens '<|endoftext|>'")
+    parser.add_argument("--vocab_path", type=str, default="vocab.json", help="where to save the vocab")
+    parser.add_argument("--merges_path", type=str, default="merges.txt", help="where to save the merges")
     parser.add_argument("--profile", action="store_true",
                         help="run under cProfile and save profiles/train_bpe.prof")
     parser.add_argument("--top", type=int, default=20, help="rows to print per sort order")
     args = parser.parse_args()
 
-    # input_path = "./data/TinyStoriesV2-GPT4-valid.txt"
-    input_path =  "./data/TinyStoriesV2-GPT4-train.txt"
+    print(f"training BPE on {args.input_path} (vocab_size={args.vocab_size}, special_tokens={args.special_tokens})")
 
     profiler = cProfile.Profile() if args.profile else None
 
@@ -300,9 +309,9 @@ def main():
         profiler.enable()
 
     vocab, merges = train_bpe(
-        input_path=input_path,
-        vocab_size=10000,
-        special_tokens=["<|endoftext|>"]
+        input_path=args.input_path,
+        vocab_size=args.vocab_size,
+        special_tokens=args.special_tokens
     )
 
     if profiler:
@@ -312,7 +321,7 @@ def main():
     print(f"vocab size: {len(vocab)}")
     print(f"merges size: {len(merges)}")
 
-    print(f"total time taken for tokenisation: {time_taken:.4f} seconds ({time_taken/60:.4f} mins)")
+    print(f"total time taken for BPE training: {time_taken:.4f} seconds ({time_taken/60:.4f} mins)")
 
     if profiler:
         out_dir = Path("profiles")
@@ -325,7 +334,10 @@ def main():
             pstats.Stats(str(out_file)).sort_stats(sortby).print_stats(args.top)
         print(f"saved {out_file}  ->  re-analyse without re-running: uv run python -m pstats {out_file}")
 
-    save_to_disk(vocab, merges)
+    for path in (args.vocab_path, args.merges_path):
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+    save_to_disk(vocab, merges, args.vocab_path, args.merges_path)
+    print(f"saved {args.vocab_path} and {args.merges_path}")
 
 if __name__ == "__main__":
     main()

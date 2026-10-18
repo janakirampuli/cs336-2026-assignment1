@@ -27,7 +27,7 @@ class CausalSelfAttention(nn.Module):
 
         self.use_rope = use_rope
         if self.use_rope:
-            self.rope = RotaryPositionalEmbedding(theta, self.d_k, max_seq_len)
+            self.rope = RotaryPositionalEmbedding(theta, self.d_k, max_seq_len, device)
 
         self.causal = causal
 

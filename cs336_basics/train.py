@@ -48,6 +48,9 @@ def parse_args():
     # device
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu",
                         help="device to use (cuda, mps, cpu)")
+    parser.add_argument("--autocast_dtype", type=str, default="float32", choices=["float32", "bfloat16"],
+                        help="bfloat16 runs matmuls in bf16 (weights, optimizer and loss stay float32)")
+    parser.add_argument("--seed", type=int, default=0, help="seed for init and batch sampling")
 
     # logging
     parser.add_argument("--eval_interval", type=int, default=500, help="how often to evaluate on validation set")
@@ -63,23 +66,17 @@ def parse_args():
     return parser.parse_args()
 
 @torch.no_grad()
-def estimate_loss(model, data_dir, batch_size, context_length, device, eval_iters):
-    losses_by_split = {}
+def estimate_val_loss(model, val_data, batch_size, context_length, device, eval_iters, autocast):
     model.eval()
-
-    train_data = np.memmap(os.path.join(data_dir, 'train.bin'), dtype=np.uint16, mode='r')
-    val_data = np.memmap(os.path.join(data_dir, 'val.bin'), dtype=np.uint16, mode='r')
-
-    for split, data in [('train', train_data), ('val', val_data)]:
-        losses = torch.zeros(eval_iters)
-        for k in range(eval_iters):
-            inputs, targets = get_batch(data, batch_size, context_length, device)
+    losses = torch.zeros(eval_iters)
+    for k in range(eval_iters):
+        inputs, targets = get_batch(val_data, batch_size, context_length, device)
+        with autocast():
             logits = model(inputs)
-            loss = cross_entropy(logits, targets)
-            losses[k] = loss.item()
-        losses_by_split[split] = losses.mean().item()
+        loss = cross_entropy(logits.float(), targets)
+        losses[k] = loss.item()
     model.train()
-    return losses_by_split
+    return losses.mean().item()
 
 
 def main():
@@ -88,6 +85,12 @@ def main():
     os.makedirs(args.out_dir, exist_ok=True)
     device = torch.device(args.device)
     print(f"using device: {device}")
+    if device.type == "mps" and args.autocast_dtype == "bfloat16":
+        raise ValueError("bfloat16 autocast with torch.compile gives nan gradients on mps (torch 2.11); use float32")
+    torch.manual_seed(args.seed)
+
+    def autocast():
+        return torch.autocast(device.type, dtype=torch.bfloat16, enabled=args.autocast_dtype == "bfloat16")
 
     use_wandb = not args.no_wandb
     if use_wandb:
@@ -98,6 +101,8 @@ def main():
         )
 
     train_data = np.memmap(os.path.join(args.data_dir, 'train.bin'), dtype=np.uint16, mode='r')
+    val_data = np.memmap(os.path.join(args.data_dir, 'val.bin'), dtype=np.uint16, mode='r')
+    tokens_per_step = args.batch_size * args.context_length
 
     model_config = {
         "vocab_size": args.vocab_size,
@@ -114,11 +119,7 @@ def main():
 
     model = TransformerLM(**model_config)
     model.to(device)
-
-    if args.device == "mps":
-        model = torch.compile(model, backend="aot_eager")
-    else:
-        model = torch.compile(model)
+    model = torch.compile(model)
 
     optimizer = AdamW(
         params=model.parameters(),
@@ -136,9 +137,6 @@ def main():
 
     print(f"model parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.3f}M")
 
-    if use_wandb:
-        wandb.watch(model, log="all", log_freq=500)
-
     train_start_time = time.time()
     t_iter_start = time.time()
     inputs, targets = get_batch(train_data, args.batch_size, args.context_length, device)
@@ -150,22 +148,24 @@ def main():
             for param_group in optimizer.param_groups:
                 param_group['lr'] = lr
 
-            logits = model(inputs)
-            loss = cross_entropy(logits, targets)
+            with autocast():
+                logits = model(inputs)
+            loss = cross_entropy(logits.float(), targets)
             loss.backward()
 
-            gradient_clipping(model.parameters(), args.grad_clip)
+            grad_norm = gradient_clipping(model.parameters(), args.grad_clip)
             optimizer.step()
             optimizer.zero_grad()
 
             inputs, targets = get_batch(train_data, args.batch_size, args.context_length, device)
+
+            is_last_iter = iter_num == args.max_iters - 1
 
             if iter_num % args.log_interval == 0:
                 t_now = time.time()
                 dt = t_now - t_iter_start
                 t_iter_start = t_now
 
-                wall_time = t_now - train_start_time
                 loss_value = loss.item()
                 ms_per_step = (dt * 1000) / args.log_interval
 
@@ -175,34 +175,35 @@ def main():
                     wandb.log({
                         "train/loss": loss_value,
                         "train/lr": lr,
-                        "train/step": iter_num,
-                        "train/wall_time": wall_time,
-                        "perf/ms_per_step": ms_per_step
+                        "train/grad_norm": grad_norm.item(),
+                        "perf/ms_per_step": ms_per_step,
+                        "wall_time": t_now - train_start_time,
+                        "tokens": (iter_num + 1) * tokens_per_step
                     }, step=iter_num)
 
-            if iter_num > 0 and iter_num % args.eval_interval == 0:
+            if iter_num > 0 and (iter_num % args.eval_interval == 0 or is_last_iter):
                 print(f"evaluating at iter {iter_num}...")
-                losses = estimate_loss(
-                    model, args.data_dir, args.batch_size, args.context_length, device, args.eval_iters
+                val_loss = estimate_val_loss(
+                    model, val_data, args.batch_size, args.context_length, device, args.eval_iters, autocast
                 )
-                print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+                print(f"step {iter_num}: val loss {val_loss:.4f}")
 
                 if use_wandb:
                     wandb.log({
-                        "val/loss": losses["val"],
-                        "val/train_loss": losses["train"],
-                        "val/step": iter_num
+                        "val/loss": val_loss,
+                        "wall_time": time.time() - train_start_time,
+                        "tokens": (iter_num + 1) * tokens_per_step
                     }, step=iter_num)
 
-                if losses['val'] < best_val_loss:
-                    best_val_loss = losses['val']
+                if val_loss < best_val_loss:
+                    best_val_loss = val_loss
                     checkpoint_path = os.path.join(args.out_dir, 'ckpt_best.pt')
                     print(f"saving best checkpoint to {checkpoint_path}")
                     # store iterations completed, so resume starts at the next one
                     save_checkpoint(model, optimizer, iter_num + 1, checkpoint_path)
                 t_iter_start = time.time()
 
-            if iter_num > 0 and iter_num % args.save_interval == 0:
+            if iter_num > 0 and (iter_num % args.save_interval == 0 or is_last_iter):
                 checkpoint_path = os.path.join(args.out_dir, f'ckpt_{iter_num}.pt')
                 print(f"saving regular checkpoint to {checkpoint_path}")
                 save_checkpoint(model, optimizer, iter_num + 1, checkpoint_path)

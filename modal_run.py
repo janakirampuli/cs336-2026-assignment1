@@ -18,6 +18,10 @@ the same locally and remotely. Write checkpoints/logs under runs/ to keep them.
     uv run modal volume ls cs336-a1-runs
     uv run modal volume get cs336-a1-runs <remote_path> <local_path>
     uv run modal volume put cs336-a1-data <local_file> <remote_path>
+
+`run` gets WANDB_API_KEY from the Modal secret "wandb", which must exist before any `run` call:
+
+    uv run modal secret create wandb WANDB_API_KEY=<key from https://wandb.ai/authorize>
 """
 
 import gzip
@@ -36,6 +40,7 @@ app = modal.App("cs336-a1")
 data_volume = modal.Volume.from_name("cs336-a1-data", create_if_missing=True, version=2)
 runs_volume = modal.Volume.from_name("cs336-a1-runs", create_if_missing=True, version=2)
 VOLUMES = {f"{REMOTE_ROOT}/data": data_volume, f"{REMOTE_ROOT}/runs": runs_volume}
+wandb_secret = modal.Secret.from_name("wandb", required_keys=["WANDB_API_KEY"])
 
 # Not shipped with the code: data/ and runs/ come from volumes; the rest is local-only or large.
 IGNORE = [
@@ -69,7 +74,7 @@ DATASETS = {
 }
 
 
-@app.function(image=image, volumes=VOLUMES, timeout=DEFAULT_TIMEOUT_SECONDS)
+@app.function(image=image, volumes=VOLUMES, secrets=[wandb_secret], timeout=DEFAULT_TIMEOUT_SECONDS)
 def run(cmd: str) -> None:
     print(f"$ {cmd}", flush=True)
     try:
