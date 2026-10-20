@@ -1,4 +1,5 @@
 import argparse
+import math
 import os
 import time
 
@@ -51,10 +52,16 @@ def parse_args():
     parser.add_argument("--autocast_dtype", type=str, default="float32", choices=["float32", "bfloat16"],
                         help="bfloat16 runs matmuls in bf16 (weights, optimizer and loss stay float32)")
     parser.add_argument("--seed", type=int, default=0, help="seed for init and batch sampling")
+    parser.add_argument("--fused_attention", action="store_true",
+                        help="use torch's F.scaled_dot_product_attention instead of our own")
+    parser.add_argument("--max_minutes", type=float, default=None,
+                        help="stop training after this many minutes of wall-clock time, then eval and save")
 
     # logging
     parser.add_argument("--eval_interval", type=int, default=500, help="how often to evaluate on validation set")
     parser.add_argument("--eval_iters", type=int, default=200, help="number of batches per evaluation")
+    parser.add_argument("--eval_batch_size", type=int, default=None,
+                        help="batch size for evaluation (default: same as --batch_size)")
     parser.add_argument("--save_interval", type=int, default=1000, help="how often to save checkpoints")
     parser.add_argument("--log_interval", type=int, default=10, help="how often to log metrics to console")
 
@@ -66,15 +73,12 @@ def parse_args():
     return parser.parse_args()
 
 @torch.no_grad()
-def estimate_val_loss(model, val_data, batch_size, context_length, device, eval_iters, autocast):
+def estimate_val_loss(model, loss_fn, val_data, batch_size, context_length, device, eval_iters):
     model.eval()
     losses = torch.zeros(eval_iters)
     for k in range(eval_iters):
         inputs, targets = get_batch(val_data, batch_size, context_length, device)
-        with autocast():
-            logits = model(inputs)
-        loss = cross_entropy(logits.float(), targets)
-        losses[k] = loss.item()
+        losses[k] = loss_fn(inputs, targets).item()
     model.train()
     return losses.mean().item()
 
@@ -85,8 +89,6 @@ def main():
     os.makedirs(args.out_dir, exist_ok=True)
     device = torch.device(args.device)
     print(f"using device: {device}")
-    if device.type == "mps" and args.autocast_dtype == "bfloat16":
-        raise ValueError("bfloat16 autocast with torch.compile gives nan gradients on mps (torch 2.11); use float32")
     torch.manual_seed(args.seed)
 
     def autocast():
@@ -112,14 +114,21 @@ def main():
         "num_heads": args.num_heads,
         "d_ff": args.d_ff,
         "theta": args.rope_theta,
-        "device": device
+        "device": device,
+        "fused_attention": args.fused_attention
     }
 
     print(f"TransformerLM config: {model_config}")
 
     model = TransformerLM(**model_config)
     model.to(device)
-    model = torch.compile(model)
+
+    def compute_loss(inputs, targets):
+        with autocast():
+            logits = model(inputs)
+        return cross_entropy(logits.float(), targets)
+
+    loss_fn = torch.compile(compute_loss)
 
     optimizer = AdamW(
         params=model.parameters(),
@@ -148,9 +157,7 @@ def main():
             for param_group in optimizer.param_groups:
                 param_group['lr'] = lr
 
-            with autocast():
-                logits = model(inputs)
-            loss = cross_entropy(logits.float(), targets)
+            loss = loss_fn(inputs, targets)
             loss.backward()
 
             grad_norm = gradient_clipping(model.parameters(), args.grad_clip)
@@ -159,7 +166,8 @@ def main():
 
             inputs, targets = get_batch(train_data, args.batch_size, args.context_length, device)
 
-            is_last_iter = iter_num == args.max_iters - 1
+            out_of_time = args.max_minutes is not None and time.time() - train_start_time > args.max_minutes * 60
+            is_last_iter = iter_num == args.max_iters - 1 or out_of_time
 
             if iter_num % args.log_interval == 0:
                 t_now = time.time()
@@ -181,10 +189,15 @@ def main():
                         "tokens": (iter_num + 1) * tokens_per_step
                     }, step=iter_num)
 
+                if not math.isfinite(loss_value):
+                    print(f"loss is {loss_value} at iter {iter_num}, stopping (diverged)")
+                    break
+
             if iter_num > 0 and (iter_num % args.eval_interval == 0 or is_last_iter):
                 print(f"evaluating at iter {iter_num}...")
                 val_loss = estimate_val_loss(
-                    model, val_data, args.batch_size, args.context_length, device, args.eval_iters, autocast
+                    model, loss_fn, val_data, args.eval_batch_size or args.batch_size, args.context_length, device,
+                    args.eval_iters
                 )
                 print(f"step {iter_num}: val loss {val_loss:.4f}")
 
@@ -207,6 +220,10 @@ def main():
                 checkpoint_path = os.path.join(args.out_dir, f'ckpt_{iter_num}.pt')
                 print(f"saving regular checkpoint to {checkpoint_path}")
                 save_checkpoint(model, optimizer, iter_num + 1, checkpoint_path)
+
+            if out_of_time:
+                print(f"reached --max_minutes {args.max_minutes} at iter {iter_num}, stopping")
+                break
 
             iter_num += 1
     except KeyboardInterrupt:

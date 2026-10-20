@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import einops
 from .linear import Linear
 from .rope import RotaryPositionalEmbedding
@@ -15,7 +16,8 @@ class CausalSelfAttention(nn.Module):
             theta: float = 10000.0,
             max_seq_len: int = 4096,
             use_rope: bool = True,
-            causal: bool = True
+            causal: bool = True,
+            fused_attention: bool = False
     ):
         super().__init__()
         self.d_model = d_model
@@ -30,6 +32,7 @@ class CausalSelfAttention(nn.Module):
             self.rope = RotaryPositionalEmbedding(theta, self.d_k, max_seq_len, device)
 
         self.causal = causal
+        self.fused_attention = fused_attention
 
     def forward(
             self,
@@ -49,11 +52,14 @@ class CausalSelfAttention(nn.Module):
             q = self.rope(q, token_positions)
             k = self.rope(k, token_positions)
 
-        causal_mask = None
-        if self.causal:
-            causal_mask = torch.tril(
-                torch.ones(seq_len, seq_len, device=x.device, dtype=torch.bool)
-            )
-        attn_output = scaled_dot_product_attention(q, k, v, causal_mask)
+        if self.fused_attention:
+            attn_output = F.scaled_dot_product_attention(q, k, v, is_causal=self.causal)
+        else:
+            causal_mask = None
+            if self.causal:
+                causal_mask = torch.tril(
+                    torch.ones(seq_len, seq_len, device=x.device, dtype=torch.bool)
+                )
+            attn_output = scaled_dot_product_attention(q, k, v, causal_mask)
         attn_output = einops.rearrange(attn_output, 'b h s d -> b s (h d)', h=self.num_heads)
         return self.output_proj(attn_output)

@@ -16,14 +16,15 @@ class TransformerLM(nn.Module):
             d_ff: int,
             theta: float=10000.0,
             device: torch.device | None=None,
-            dtype: torch.dtype | None=None
+            dtype: torch.dtype | None=None,
+            fused_attention: bool=False
     ):
         super().__init__()
 
         self.token_embeddings = Embedding(vocab_size, d_model, device, dtype)
 
         self.layers = nn.ModuleList([
-            TransformerBlock(d_model, num_heads, d_ff, theta, context_length, device, dtype)
+            TransformerBlock(d_model, num_heads, d_ff, theta, context_length, device, dtype, fused_attention)
             for _ in range(num_layers)
         ])
         self.ln_final = RMSNorm(d_model=d_model, device=device, dtype=dtype)

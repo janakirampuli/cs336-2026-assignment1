@@ -1,0 +1,44 @@
+# ---- checks ----
+uv run pytest -q
+uv run ruff check .
+
+# ---- one-time setup ----
+uv run wandb login
+uv run modal secret create wandb WANDB_API_KEY=<key>
+uv run modal run modal_run.py::download_data
+
+# ---- modal volumes ----
+uv run modal volume ls cs336-a1-data /
+uv run modal volume ls cs336-a1-runs /
+uv run modal volume put cs336-a1-data <local_path> <remote_path>
+uv run modal volume get cs336-a1-runs <remote_path> <local_path>
+
+# ---- tokenizer: train BPE, then encode text into a uint16 .bin ----
+uv run python -m cs336_basics.train_bpe --input_path data/TinyStoriesV2-GPT4-train.txt --vocab_size 10000 \
+    --vocab_path vocab.json --merges_path merges.txt
+uv run python -m cs336_basics.tokenize_data --input_path data/TinyStoriesV2-GPT4-train.txt \
+    --output_path data/tinystories/train.bin --vocab_path vocab.json --merges_path merges.txt
+
+# ---- train on modal (cuda + bf16) ----
+uv run modal run modal_run.py --gpu H100 --timeout 1200 --cmd "python -m cs336_basics.train \
+    --data_dir data/tinystories --device cuda --autocast_dtype bfloat16 \
+    --batch_size 128 --context_length 256 --max_iters 10000 --warmup_iters 500 \
+    --max_lr 3e-3 --min_lr 0 --adam_beta2 0.95 --eval_interval 500 --eval_iters 50 \
+    --out_dir runs/<name> --wandb_run_name <name>"
+
+# ---- LR sweep: one sequential container ----
+uv run modal run modal_run.py --gpu H100 --timeout 3600 --cmd "BATCH=128 STEPS=10000 bash sweep_lr.sh 1e-3 3e-3"
+
+# ---- LR sweep: one container per lr, in parallel ----
+for lr in 1e-4 3e-4 1e-3 3e-3 1e-2 3e-2; do
+  uv run modal run --detach modal_run.py --gpu H100 --timeout 1200 \
+      --cmd "BATCH=128 STEPS=10000 WARMUP=500 EVAL_INTERVAL=500 bash sweep_lr.sh $lr" &
+done; wait
+
+# ---- resume from a checkpoint (add to any train command) ----
+--resume runs/<name>/ckpt_best.pt
+
+# ---- generate text from a checkpoint ----
+uv run modal run modal_run.py --gpu L4 --timeout 600 --cmd "python -m cs336_basics.decoding \
+    --checkpoint runs/<name>/ckpt_best.pt --vocab_path vocab.json --merges_path merges.txt --device cuda \
+    --prompt 'Once upon a time' --max_new_tokens 256 --temperature 0.8 --top_p 0.9"

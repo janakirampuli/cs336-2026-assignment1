@@ -14,8 +14,8 @@ def gradient_clipping(
 
     total_norm = torch.sqrt(sum(p.grad.norm(2)**2 for p in params_with_grad))
 
-    if total_norm > max_l2_norm:
-        for p in params_with_grad:
-            p.grad.mul_(max_l2_norm / (total_norm + 1e-6))
+    scale = torch.clamp(max_l2_norm / (total_norm + 1e-6), max=1.0)
+    for p in params_with_grad:
+        p.grad.mul_(scale)
 
     return total_norm

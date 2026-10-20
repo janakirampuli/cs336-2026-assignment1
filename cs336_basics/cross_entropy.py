@@ -4,7 +4,7 @@ def cross_entropy(
         logits: torch.Tensor,
         targets: torch.Tensor
 ) -> torch.Tensor:
-    max_logits, _ = torch.max(logits, dim=-1, keepdim=True)
+    max_logits = torch.amax(logits, dim=-1, keepdim=True).detach()
     shifted_logits = logits - max_logits
     log_sum_exp = torch.log(torch.exp(shifted_logits).sum(dim=-1, keepdim=
                                                           True))

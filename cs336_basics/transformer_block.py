@@ -13,12 +13,13 @@ class TransformerBlock(nn.Module):
             theta: float=10000.0,
             max_seq_len: int=4096,
             device: torch.device | None=None,
-            dtype: torch.dtype | None=None
+            dtype: torch.dtype | None=None,
+            fused_attention: bool=False
     ):
         super().__init__()
         self.ln1 = RMSNorm(d_model=d_model, device=device, dtype=dtype)
 
-        self.attn = CausalSelfAttention(d_model=d_model, num_heads=num_heads, device=device, dtype=dtype, theta=theta, max_seq_len=max_seq_len, use_rope=True, causal=True)
+        self.attn = CausalSelfAttention(d_model=d_model, num_heads=num_heads, device=device, dtype=dtype, theta=theta, max_seq_len=max_seq_len, use_rope=True, causal=True, fused_attention=fused_attention)
 
         self.ln2 = RMSNorm(d_model=d_model, device=device, dtype=dtype)
 

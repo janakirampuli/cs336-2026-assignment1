@@ -3,12 +3,12 @@
 Workflow: get a command working locally first (tiny config, --device cpu or mps), then run the
 same command here with --device cuda and the real config. Modal bills per second while a
 container is up, so every run has a timeout (default 1h), the default GPU is a cheap L4, and
-any run whose worst-case cost (running until the timeout) exceeds $1 asks for confirmation.
+any run whose worst-case cost (running until the timeout) exceeds $5 asks for confirmation.
 
     uv run modal run modal_run.py::download_data          # one-time: fetch datasets into the data volume
     uv run modal run modal_run.py --cmd "nvidia-smi"      # sanity check on the default L4
     uv run modal run modal_run.py --gpu H100 --timeout 5400 --cmd "python <script> --device cuda ..."
-    uv run modal run modal_run.py --gpu none --cpu 16 --cmd "python <script> ..."  # CPU-only job
+    uv run modal run modal_run.py --gpu none --cpu 16 --memory-gb 64 --cmd "python <script> ..."  # CPU-only job
     uv run modal run --detach modal_run.py ...            # keep running after you close the terminal
 
 Inside the container the repo is the working directory (/root), the data volume is mounted at
@@ -34,7 +34,7 @@ import modal
 
 REMOTE_ROOT = "/root"
 DEFAULT_TIMEOUT_SECONDS = 60 * 60
-CONFIRM_ABOVE_USD = 1.0
+CONFIRM_ABOVE_USD = 5.0
 
 app = modal.App("cs336-a1")
 data_volume = modal.Volume.from_name("cs336-a1-data", create_if_missing=True, version=2)
@@ -103,10 +103,10 @@ def download_data() -> None:
         print(f"  {name}: {dest.stat().st_size / 1e9:.2f} GB", flush=True)
 
 
-def worst_case_cost(gpu_spec: str | None, cpu: float, hours: float) -> float | None:
-    """Cost if the run lasts until its timeout (GPU + CPU; memory is extra but small). None if the GPU rate is unknown."""
+def worst_case_cost(gpu_spec: str | None, cpu: float, memory_gb: int, hours: float) -> float | None:
+    """Cost if the run lasts until its timeout (GPU + CPU + requested memory). None if the GPU rate is unknown."""
     rates = dict(modal.Workspace.from_context().billing.rates())
-    per_hour = float(rates["cpu_hour_cost"]) * max(cpu, 1.0)
+    per_hour = float(rates["cpu_hour_cost"]) * max(cpu, 1.0) + float(rates["mem_gib_hour_cost"]) * memory_gb
     if gpu_spec:
         name, _, count = gpu_spec.partition(":")
         name = name.lower().replace("-", "_")
@@ -119,17 +119,23 @@ def worst_case_cost(gpu_spec: str | None, cpu: float, hours: float) -> float | N
 
 @app.local_entrypoint()
 def main(
-    cmd: str, gpu: str = "L4", timeout: int = DEFAULT_TIMEOUT_SECONDS, cpu: float = 0.0, yes: bool = False
+    cmd: str,
+    gpu: str = "L4",
+    timeout: int = DEFAULT_TIMEOUT_SECONDS,
+    cpu: float = 0.0,
+    memory_gb: int = 0,
+    yes: bool = False,
 ) -> None:
     gpu_spec = None if gpu.lower() in ("", "none", "cpu") else gpu
-    cost = worst_case_cost(gpu_spec, cpu, timeout / 3600)
+    cost = worst_case_cost(gpu_spec, cpu, memory_gb, timeout / 3600)
     month = float(modal.Workspace.from_context().billing.summary().billed_cost)
     print(
-        f"Modal run: gpu={gpu_spec or 'none'} cpu={cpu or 'default'} timeout={timeout}s | "
+        f"Modal run: gpu={gpu_spec or 'none'} cpu={cpu or 'default'} memory={memory_gb or 'default'}GB "
+        f"timeout={timeout}s | "
         f"worst case {'unknown' if cost is None else f'~${cost:.2f}'} | billed this month ${month:.2f}",
         flush=True,
     )
-    # Anything that could cost more than a dollar needs an explicit yes (or --yes).
+    # Anything that could cost more than CONFIRM_ABOVE_USD needs an explicit yes (or --yes).
     if (cost is None or cost > CONFIRM_ABOVE_USD) and not yes:
         try:
             answer = input("Launch? [y/N] ")
@@ -137,4 +143,4 @@ def main(
             answer = ""
         if answer.strip().lower() != "y":
             raise SystemExit("Aborted, nothing was launched.")
-    run.with_options(gpu=gpu_spec, cpu=cpu or None, timeout=timeout).remote(cmd)
+    run.with_options(gpu=gpu_spec, cpu=cpu or None, memory=memory_gb * 1024 or None, timeout=timeout).remote(cmd)
